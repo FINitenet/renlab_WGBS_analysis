@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local configuration and generated workflow outputs
+config.local.sh
+wgbs_qc/
+wgbs_results/
+logs/
+.state/
+.mplconfig/
+
+# Sequencing and alignment data must never be committed
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.sam
+*.bam
+*.bai
+*.cram
+*.crai
+*.bedGraph
+*.cov.gz
+*.CpG_report.txt.gz
+*.CHG_report.txt.gz
+*.CHH_report.txt.gz
