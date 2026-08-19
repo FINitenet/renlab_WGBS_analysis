@@ -17,6 +17,7 @@ dedup_sample() {
     local input_bam="${MAP_DIR}/${sample}/${sample}.bam" sample_dir="${DEDUP_DIR}/${sample}"
     local dedup_bam="${sample_dir}/${sample}.deduplicated.bam"
     local sorted_bam="${sample_dir}/${sample}.deduplicated.sorted.bam"
+    local namesorted_bam="${sample_dir}/${sample}.deduplicated.namesorted.bam"
     local marker="${sample_dir}/.complete"
     require_file "${input_bam}"
     mkdir -p "${sample_dir}"
@@ -32,18 +33,30 @@ dedup_sample() {
     fi
     require_file "${dedup_bam}"
 
-    if [[ ! -s "${marker}" || ! -s "${sorted_bam}" || ! -s "${sorted_bam}.bai" ]]; then
+    if [[ ! -s "${sorted_bam}" || ! -s "${sorted_bam}.bai" ]]; then
         log "Coordinate sort/index: ${sample}"
         samtools sort --threads "${SAMTOOLS_THREADS}" --output-fmt BAM \
             -o "${sorted_bam}.tmp" "${dedup_bam}"
         mv "${sorted_bam}.tmp" "${sorted_bam}"
         samtools index -@ "${SAMTOOLS_THREADS}" "${sorted_bam}"
-        samtools quickcheck -v "${sorted_bam}"
-        printf 'complete\n' > "${marker}"
     else
         samtools quickcheck -v "${sorted_bam}"
         log "Sort/index skip (complete): ${sample}"
     fi
+
+    # bismark_methylation_extractor requires paired mates to be adjacent.
+    # Keep the coordinate-sorted/indexed BAM for genome browsers and downstream
+    # interval tools, and create a separate query-name-sorted BAM for extraction.
+    if [[ ! -s "${namesorted_bam}" ]] || ! samtools quickcheck "${namesorted_bam}"; then
+        log "Query-name sort for methylation extraction: ${sample}"
+        samtools sort -n --threads "${SAMTOOLS_THREADS}" --output-fmt BAM \
+            -o "${namesorted_bam}.tmp" "${dedup_bam}"
+        mv "${namesorted_bam}.tmp" "${namesorted_bam}"
+    else
+        log "Query-name sort skip (complete): ${sample}"
+    fi
+    samtools quickcheck -v "${namesorted_bam}"
+    printf 'complete\n' > "${marker}"
 }
 
 for_each_sample dedup_sample

@@ -103,6 +103,22 @@ export MBIAS_REVIEWED=true
 ./run_pipeline.sh extract
 ```
 
+Aggregate a cohort's Bismark M-bias reports into a weighted TSV and PNG/PDF:
+
+```bash
+./summarize_mbias.py /path/to/wgbs_results/05_methylation \
+  -o /path/to/wgbs_results/05_methylation/mbias_summary
+```
+
+After extraction, build per-sample/group TSVs, a cohort figure and a Markdown
+summary (the default genome size is TAIR10):
+
+```bash
+./summarize_results.py /path/to/wgbs_results /path/to/samples.tsv \
+  /path/to/wgbs_qc/02_qc/qc_summary.tsv \
+  -o /path/to/wgbs_results/07_summary
+```
+
 The extractor retains CpG, CHG and CHH contexts for plant methylomes. In plants,
 CHH is biological and cannot be used as a bisulfite conversion proxy; use an
 unmethylated spike-in or the library's independent conversion control.
@@ -118,6 +134,9 @@ unmethylated spike-in or the library's independent conversion control.
 - Ordinary Bowtie2 contaminant filtering is rejected because it is not
   bisulfite-aware.
 - Paired overlap is counted once during methylation extraction.
+- Deduplicated BAMs are written in two forms: coordinate-sorted/indexed for
+  browsing and interval tools, and query-name-sorted for paired-end Bismark
+  methylation extraction so mates remain adjacent.
 - M-bias clipping is a required review gate, not a fixed arbitrary number.
 - RRBS must set `ENABLE_DEDUP=false`; coordinate deduplication is invalid for
   restriction-enzyme-defined fragments.

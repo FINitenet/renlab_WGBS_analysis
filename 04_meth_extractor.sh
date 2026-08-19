@@ -20,7 +20,9 @@ fi
 
 extract_sample() {
     local sample="$1" r1="$2" r2="$3"
-    local input_bam="${DEDUP_DIR}/${sample}/${sample}.deduplicated.sorted.bam"
+    # Paired-end extraction requires mates to remain adjacent. A coordinate-
+    # sorted BAM is retained separately for browsing and interval operations.
+    local input_bam="${DEDUP_DIR}/${sample}/${sample}.deduplicated.namesorted.bam"
     local sample_dir="${METH_DIR}/${sample}" report marker
     require_file "${input_bam}"
     mkdir -p "${sample_dir}"
@@ -31,7 +33,7 @@ extract_sample() {
     [[ -z "${r2}" ]] || cmd+=(--paired --no_overlap)
 
     if [[ "${MODE}" == "mbias" ]]; then
-        report="${sample_dir}/${sample}.deduplicated.sorted.M-bias.txt"
+        report="${sample_dir}/${sample}.deduplicated.namesorted.M-bias.txt"
         marker="${sample_dir}/.mbias.complete"
         if [[ -s "${marker}" && -s "${report}" ]]; then
             log "M-bias skip (complete): ${sample}"
@@ -44,7 +46,7 @@ extract_sample() {
         return
     fi
 
-    report="${sample_dir}/${sample}.deduplicated.sorted_splitting_report.txt"
+    report="${sample_dir}/${sample}.deduplicated.namesorted_splitting_report.txt"
     marker="${sample_dir}/.extract.complete"
     if [[ -s "${marker}" && -s "${report}" ]]; then
         log "Methylation extraction skip (complete): ${sample}"
