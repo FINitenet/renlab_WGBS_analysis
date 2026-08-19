@@ -148,3 +148,32 @@ biological design, contrasts, covariates and raw methylated/unmethylated counts.
 For small replicated WGBS studies, DSS with smoothing is a reasonable model;
 with sufficient replication, dmrseq provides selection-aware region FDR.
 Single-CpG DMCs must not be reported as DMRs.
+
+## Reference-style downstream figures
+
+`wgbs_reference_figures.py` turns completed Bismark CX reports into reusable
+context-specific bigWig tracks and count-weighted windows, then exports the
+following as both PNG and editable-text PDF:
+
+- CG/CHG/CHH profiles across scaled genes and transposable elements, including
+  2 kb flanks;
+- mC/mCG/mCHG/mCHH distributions across 1 kb genomic windows;
+- CG/CHG/CHH profiles for any requested locus.
+
+```bash
+./wgbs_reference_figures.py prepare \
+  --methylation-dir /path/to/wgbs_results/05_methylation \
+  --gff /path/to/TAIR10_GFF3_genes_transposons.gff \
+  --outdir /path/to/wgbs_results/08_reference_figures
+
+./wgbs_reference_figures.py locus \
+  --outdir /path/to/wgbs_results/08_reference_figures \
+  --region chr1:100000-110000
+```
+
+The default sample groups are inferred by removing the replicate number and
+UDI suffix (for example, `F1A1_UDI9077` becomes `F1A`). Review the emitted
+`sample_metadata.inferred.tsv` before biological interpretation. Window
+boxplots require both replicates and use summed methylated/unmethylated read
+counts; they deliberately omit significance stars because genomic windows are
+not biological replicates.
