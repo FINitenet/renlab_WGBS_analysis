@@ -10,6 +10,8 @@ mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
 require_command multiqc
 
 log "Aggregate FastQC, Trim Galore, Bismark alignment/dedup/extraction reports"
-multiqc --force --outdir "${REPORT_DIR}" "${OUTDIR}" \
+inputs=("${OUTDIR}")
+[[ -z "${RAW_QC_DIR:-}" ]] || inputs+=("${RAW_QC_DIR}")
+multiqc --force --outdir "${REPORT_DIR}" "${inputs[@]}" \
     >"${LOG_DIR}/06_multiqc.log" 2>&1
 log "Combined report: ${REPORT_DIR}/multiqc_report.html"

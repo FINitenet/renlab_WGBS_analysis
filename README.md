@@ -1,11 +1,13 @@
 # renlab WGBS analysis
 
 A restartable WGBS workflow built around FastQC, MultiQC, Trim Galore and
-Bismark. It provides two entry points:
+Bismark. The preferred entry point is:
 
-- `wgbs_qc.py`: input FASTQ folder to sample-level raw-read QC figures.
-- `run_pipeline.sh`: trimming, alignment, deduplication, M-bias review,
-  methylation extraction and final MultiQC aggregation.
+- `wgbs_oneclick.py`: FASTQ to QC, mapping, methylation calls, summaries and
+  all publication figures in one restartable command.
+
+The smaller Python/shell programs remain internal, independently testable
+stages. `wgbs_qc.py` and `run_pipeline.sh` are retained for compatibility.
 
 The workflow supports directional, non-directional and PBAT libraries. WGBS
 coordinate deduplication is enabled by default and must be disabled for RRBS.
@@ -13,7 +15,8 @@ coordinate deduplication is enabled by default and must be disabled for RRBS.
 ## Requirements
 
 - Python 3.8+
-- matplotlib (only for the static PNG/PDF overview)
+- numpy, pandas, matplotlib, seaborn and pyBigWig
+- deepTools `computeMatrix`, pigz and awk
 - FastQC
 - MultiQC
 - Trim Galore / Cutadapt
@@ -23,6 +26,47 @@ coordinate deduplication is enabled by default and must be disabled for RRBS.
 
 Activate an environment containing these tools, or set `TOOL_BIN` to its `bin`
 directory.
+
+## One-command complete analysis
+
+The analysis directory should contain `1_rawdata_merged/` (preferred) or
+`1_rawdata/`. The program searches upward for
+`reference/TAIR10_plus_transgene_bismark_bt2`, uses its combined FASTA/index,
+and writes new-reference results to `wgbs_joint_results/` so old TAIR10-only
+completion markers cannot be reused accidentally.
+
+Run the complete workflow with one command:
+
+```bash
+./wgbs_oneclick.py \
+  /path/to/analysis \
+  --tool-bin /path/to/conda/env/bin
+```
+
+This single command performs:
+
+1. FASTQ discovery/lane staging, pair validation, FastQC and raw MultiQC.
+2. Configuration/index validation, Trim Galore and Bismark alignment.
+3. WGBS deduplication, coordinate/name sorting and M-bias reports.
+4. Final extraction with the reviewed cohort clipping values
+   `R1=10/0 bp, R2=10/3 bp`, then final MultiQC and cohort summaries.
+5. Gene/TE CG/CHG/CHH metaprofiles, the requested mC/mCG/mCHG/mCHH boxplot
+   panel, and whole-transgene locus/feature-bar figures.
+
+Every expensive stage is restartable. The file `.oneclick_config.json` binds an
+output directory to the FASTA checksum, Bismark genome and sample sheet; the
+program refuses to reuse results if those analysis-defining inputs change.
+Inspect a complete command plan without launching computation:
+
+```bash
+./wgbs_oneclick.py /path/to/analysis --dry-run
+```
+
+Resume or run only a portion with `--from-stage` / `--to-stage`, for example:
+
+```bash
+./wgbs_oneclick.py /path/to/analysis --from-stage figures
+```
 
 ## Input folder to QC figures
 

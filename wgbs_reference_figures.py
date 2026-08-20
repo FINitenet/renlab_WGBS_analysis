@@ -11,13 +11,13 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import math
 import os
 import re
 import subprocess
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-wgbs-figures")
 
@@ -62,8 +62,21 @@ def infer_group(sample: str) -> str:
     return re.sub(r"\d+$", "", core)
 
 
-def parse_gff(gff: Path, outdir: Path):
-    chrom_sizes = {}
+def read_chrom_sizes(path: Path):
+    """Read a two-column sizes file or samtools FASTA index."""
+    sizes = {}
+    with path.open() as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2:
+                sizes[normalize_chrom(fields[0])] = int(fields[1])
+    if not sizes:
+        raise SystemExit(f"No chromosome sizes found in {path}")
+    return sizes
+
+
+def parse_gff(gff: Path, outdir: Path, sizes_path: Optional[Path] = None):
+    chrom_sizes = read_chrom_sizes(sizes_path) if sizes_path else {}
     genes, tes = [], []
     with gff.open() as handle:
         for line in handle:
@@ -75,7 +88,7 @@ def parse_gff(gff: Path, outdir: Path):
             chrom, feature = normalize_chrom(fields[0]), fields[2]
             start, end, strand = int(fields[3]), int(fields[4]), fields[6]
             attrs = fields[8]
-            if feature == "chromosome":
+            if feature == "chromosome" and not sizes_path:
                 chrom_sizes[chrom] = max(chrom_sizes.get(chrom, 0), end)
             if feature not in {"gene", "transposable_element"}:
                 continue
@@ -130,6 +143,11 @@ def prepare_sample(report_s: str, outdir_s: str, chrom_sizes, window_size: int,
     track_dir.mkdir(parents=True, exist_ok=True)
     window_dir.mkdir(parents=True, exist_ok=True)
     window_path = window_dir / f"{sample}.windows.tsv.gz"
+    bigwigs = [track_dir / f"{sample}.{ctx}.bw" for ctx in CONTEXTS]
+    if window_path.exists() and window_path.stat().st_size > 0 and all(
+        path.exists() and path.stat().st_size > 0 for path in bigwigs
+    ):
+        return sample, {ctx: "cached" for ctx in CONTEXTS}
     temp_dir = outdir / "tmp" / sample
     temp_dir.mkdir(parents=True, exist_ok=True)
     prefix = temp_dir / sample
@@ -251,7 +269,8 @@ def plot_metaprofiles(outdir: Path, metadata: pd.DataFrame):
             ax.set_ylabel("Methylation level")
             sns.despine(ax=ax)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="outside upper center", ncol=len(labels), frameon=False)
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.01),
+               ncol=len(labels), frameon=False)
     save_figure(fig, outdir / "gene_TE_methylation_profiles")
 
 
@@ -281,8 +300,7 @@ def plot_boxplots(outdir: Path, metadata: pd.DataFrame, min_coverage: int, min_s
     for ax, ctx in zip(axes, ("mC", *CONTEXTS)):
         subset = data[data["context"] == ctx]
         sns.boxplot(data=subset, x="group", y="methylation_percent", order=groups,
-                    hue="group", palette=palette, legend=False, showfliers=False,
-                    width=0.68, linewidth=0.8, ax=ax)
+                    palette=palette, showfliers=False, width=0.68, linewidth=0.8, ax=ax)
         display_context = ctx if ctx == "mC" else f"m{ctx}"
         ax.set_ylabel(f"{display_context}\nmethylation (%)")
         ax.set_xlabel("")
@@ -301,34 +319,116 @@ def parse_region(text: str):
     return normalize_chrom(match.group(1)), int(match.group(2)) - 1, int(match.group(3))
 
 
-def plot_locus(outdir: Path, metadata: pd.DataFrame, region_text: str, bins: int):
-    chrom, start, end = parse_region(region_text)
-    edges = np.linspace(start, end, bins + 1, dtype=int)
-    centers = (edges[:-1] + edges[1:]) / 2
-    fig, axes = plt.subplots(3, 1, figsize=(10.5, 6.0), sharex=True, constrained_layout=True)
-    for ax, ctx in zip(axes, CONTEXTS):
+def read_features(path: Optional[Path], chrom: str, start: int, end: int):
+    if path is None:
+        return []
+    features = []
+    with path.open() as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 3 or normalize_chrom(fields[0]) != chrom:
+                continue
+            left, right = int(fields[1]), int(fields[2])
+            if right <= start or left >= end:
+                continue
+            features.append((max(left, start), min(right, end), fields[3] if len(fields) > 3 else "feature"))
+    return features
+
+
+def locus_values(outdir: Path, metadata: pd.DataFrame, chrom: str, start: int,
+                 end: int, bins: int):
+    rows, profiles = [], {}
+    for ctx in CONTEXTS:
         for group, group_df in metadata.groupby("group", sort=False):
             replicate_profiles = []
             for sample in group_df["sample"]:
-                bw = pyBigWig.open(str(outdir / "tracks" / f"{sample}.{ctx}.bw"))
-                values = np.asarray(bw.stats(chrom, start, end, nBins=bins, type="mean"), dtype=float)
-                bw.close()
+                with pyBigWig.open(str(outdir / "tracks" / f"{sample}.{ctx}.bw")) as bw:
+                    if chrom not in bw.chroms():
+                        raise SystemExit(f"{chrom} is absent from {sample}.{ctx}.bw; rebuild tracks with --chrom-sizes")
+                    values = np.asarray(bw.stats(chrom, start, end, nBins=bins, type="mean"), dtype=float)
                 replicate_profiles.append(values)
-            profile = np.nanmean(np.vstack(replicate_profiles), axis=0)
-            ax.plot(centers, profile, lw=1.4, color=COLORS.get(group), label=group)
+                for bin_i, value in enumerate(values):
+                    rows.append((sample, group, ctx, bin_i, value))
+            profiles[(ctx, group)] = np.nanmean(np.vstack(replicate_profiles), axis=0)
+    return profiles, rows
+
+
+def plot_locus(outdir: Path, metadata: pd.DataFrame, region_text: str, bins: int,
+               feature_bed: Optional[Path] = None):
+    chrom, start, end = parse_region(region_text)
+    edges = np.linspace(start, end, bins + 1, dtype=int)
+    centers = (edges[:-1] + edges[1:]) / 2
+    profiles, rows = locus_values(outdir, metadata, chrom, start, end, bins)
+    features = read_features(feature_bed, chrom, start, end)
+    nrows = 4 if features else 3
+    ratios = [1, 1, 1, 0.38] if features else None
+    fig, axes = plt.subplots(nrows, 1, figsize=(10.5, 6.8 if features else 6.0),
+                             sharex=True, constrained_layout=True,
+                             gridspec_kw={"height_ratios": ratios} if ratios else None)
+    for ax, ctx in zip(axes, CONTEXTS):
+        for group in metadata["group"].drop_duplicates():
+            ax.plot(centers, profiles[(ctx, group)], lw=1.4,
+                    color=COLORS.get(group, "#777777"), label=group)
         ax.set_ylabel(f"{ctx}\nmethylation")
         ax.set_ylim(bottom=0)
         sns.despine(ax=ax)
+    if features:
+        ax = axes[-1]
+        for index, (left, right, name) in enumerate(features):
+            ax.add_patch(mpl.patches.Rectangle((left, 0.15), right - left, 0.7,
+                                                color="#8DA0CB", ec="#333333", lw=0.5))
+            ax.text((left + right) / 2, 0.5, name, ha="center", va="center", fontsize=7,
+                    clip_on=True)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([])
+        ax.set_ylabel("Features")
+        sns.despine(ax=ax, left=True)
     axes[-1].set_xlabel(f"{chrom} coordinate (bp)")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="outside upper center", ncol=len(labels), frameon=False)
-    save_figure(fig, outdir / f"locus_{chrom}_{start+1}_{end}")
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.01),
+               ncol=len(labels), frameon=False)
+    stem = outdir / f"locus_{chrom}_{start+1}_{end}"
+    save_figure(fig, stem)
+    pd.DataFrame(rows, columns=["sample", "group", "context", "bin", "methylation"]).to_csv(
+        stem.with_suffix(".profiles.tsv.gz"), sep="\t", index=False
+    )
+
+    if features:
+        bar_rows = []
+        for sample in metadata["sample"]:
+            group = metadata.loc[metadata["sample"] == sample, "group"].iloc[0]
+            for ctx in CONTEXTS:
+                with pyBigWig.open(str(outdir / "tracks" / f"{sample}.{ctx}.bw")) as bw:
+                    for left, right, name in features:
+                        value = bw.stats(chrom, left, right, type="mean")[0]
+                        bar_rows.append((sample, group, ctx, name, value))
+        bars = pd.DataFrame(bar_rows, columns=["sample", "group", "context", "feature", "methylation"])
+        bars.to_csv(outdir / "locus_feature_methylation.tsv", sep="\t", index=False)
+        fig, axes = plt.subplots(1, 3, figsize=(13, 4.2), sharey=False, constrained_layout=True)
+        order = [name for _, _, name in features]
+        groups = metadata["group"].drop_duplicates().tolist()
+        palette = {group: COLORS.get(group, "#777777") for group in groups}
+        for ax, ctx in zip(axes, CONTEXTS):
+            sns.barplot(data=bars[bars["context"] == ctx], x="feature", y="methylation",
+                        hue="group", order=order, hue_order=groups, palette=palette,
+                        errorbar="se", capsize=0.08, ax=ax)
+            ax.set_title(f"{ctx} methylation")
+            ax.set_xlabel("")
+            ax.tick_params(axis="x", rotation=35)
+            sns.despine(ax=ax)
+            if ax is not axes[0] and ax.legend_:
+                ax.legend_.remove()
+        axes[0].set_ylabel("Mean methylation")
+        axes[0].legend(frameon=False, fontsize=7)
+        save_figure(fig, outdir / "locus_feature_methylation_bars")
 
 
 def command_prepare(args):
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    chrom_sizes = parse_gff(Path(args.gff), outdir)
+    chrom_sizes = parse_gff(Path(args.gff), outdir, Path(args.chrom_sizes) if args.chrom_sizes else None)
     reports = discover_reports(Path(args.methylation_dir))
     metadata_path = outdir / "sample_metadata.inferred.tsv"
     write_metadata(reports, metadata_path)
@@ -355,12 +455,13 @@ def command_prepare(args):
 def command_locus(args):
     outdir = Path(args.outdir)
     metadata = pd.read_csv(outdir / "sample_metadata.inferred.tsv", sep="\t")
-    plot_locus(outdir, metadata, args.region, args.bins)
+    plot_locus(outdir, metadata, args.region, args.bins,
+               Path(args.feature_bed) if args.feature_bed else None)
 
 
 def command_plot(args):
     outdir = Path(args.outdir)
-    parse_gff(Path(args.gff), outdir)
+    parse_gff(Path(args.gff), outdir, Path(args.chrom_sizes) if args.chrom_sizes else None)
     metadata = pd.read_csv(outdir / "sample_metadata.inferred.tsv", sep="\t")
     run_compute_matrix(outdir, metadata, args.threads)
     plot_metaprofiles(outdir, metadata)
@@ -373,6 +474,7 @@ def build_parser():
     prep = sub.add_parser("prepare", help="prepare tracks/windows and draw cohort figures")
     prep.add_argument("--methylation-dir", required=True)
     prep.add_argument("--gff", required=True)
+    prep.add_argument("--chrom-sizes", help="two-column sizes or FASTA .fai; required for contigs absent from GFF")
     prep.add_argument("--outdir", required=True)
     prep.add_argument("--workers", type=int, default=2, help="CX reports processed concurrently")
     prep.add_argument("--threads", type=int, default=8, help="computeMatrix worker count")
@@ -383,6 +485,7 @@ def build_parser():
     prep.set_defaults(func=command_prepare)
     plot = sub.add_parser("plot", help="reuse prepared tracks/windows and redraw cohort figures")
     plot.add_argument("--gff", required=True)
+    plot.add_argument("--chrom-sizes", help="two-column sizes or FASTA .fai")
     plot.add_argument("--outdir", required=True)
     plot.add_argument("--threads", type=int, default=8)
     plot.add_argument("--min-window-coverage", type=int, default=20)
@@ -392,6 +495,7 @@ def build_parser():
     locus.add_argument("--outdir", required=True)
     locus.add_argument("--region", required=True, help="e.g. chr1:10000-20000")
     locus.add_argument("--bins", type=int, default=100)
+    locus.add_argument("--feature-bed", help="BED features to draw and summarize")
     locus.set_defaults(func=command_locus)
     return parser
 
